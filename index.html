@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FaceX Check-In — Offline Face-ID Booth</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🟢</text></svg>" />
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #111a2e;
+    --panel-2: #0e1526;
+    --line: #1f2b47;
+    --text: #e6edf7;
+    --muted: #8fa3c0;
+    --accent: #10b981;
+    --accent-2: #0ea5e9;
+    --danger: #ef4444;
+    --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(1200px 700px at 20% -10%, #16213c 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+  }
+  /* ===== top bar ===== */
+  header {
+    display: flex; align-items: center; gap: 14px;
+    height: 56px; padding: 0 18px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(14, 21, 38, 0.85);
+    backdrop-filter: blur(6px);
+  }
+  .logo {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), #059669);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; color: #04121a; font-size: 16px;
+  }
+  header h1 { font-size: 15px; font-weight: 650; letter-spacing: .2px; margin: 0; }
+  header h1 small { color: var(--muted); font-weight: 500; }
+  .pill {
+    font-size: 11px; font-weight: 700; letter-spacing: .6px;
+    padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--accent); background: rgba(16,185,129,.08);
+  }
+  .spacer { flex: 1; }
+  .hdr-stat { font-size: 11px; color: var(--muted); text-align: right; line-height: 1.35; }
+  .hdr-stat b { color: var(--text); font-variant-numeric: tabular-nums; }
+  /* ===== layout ===== */
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 400px;
+    height: calc(100% - 56px);
+  }
+  /* ===== camera stage ===== */
+  .stage {
+    position: relative; display: flex; align-items: center; justify-content: center;
+    background: #05080f; overflow: hidden;
+  }
+  #video {
+    position: absolute; width: 100%; height: 100%; object-fit: cover;
+    transform: scaleX(-1); /* mirror like a real kiosk */
+  }
+  #overlay { position: absolute; width: 100%; height: 100%; }
+  .stage-cta {
+    position: absolute; text-align: center; z-index: 5;
+  }
+  .stage-cta p { color: var(--muted); margin: 12px 0 0; font-size: 13px; }
+  .btn {
+    background: var(--accent); color: #04170f; border: 0; border-radius: 10px;
+    font-weight: 700; font-size: 14px; padding: 12px 26px; cursor: pointer;
+    transition: transform .08s ease, filter .15s ease;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:active { transform: scale(.97); }
+  .btn.secondary { background: #1c2740; color: var(--text); border: 1px solid var(--line); }
+  .btn.danger { background: var(--danger); color: #fff; }
+  .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 600; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.small { font-size: 12px; padding: 8px 12px; border-radius: 8px; }
+  /* result banner */
+  #banner {
+    position: absolute; left: 24px; right: 24px; top: 22px; z-index: 6;
+    display: none; align-items: center; gap: 16px;
+    border-radius: 14px; padding: 14px 18px;
+    background: rgba(6, 40, 26, .82); border: 1px solid rgba(16,185,129,.4);
+    backdrop-filter: blur(4px);
+  }
+  #banner.unknown { background: rgba(46, 9, 9, .82); border-color: rgba(239,68,68,.4); }
+  #banner .big { font-size: 26px; font-weight: 800; letter-spacing: .2px; }
+  #banner .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  #banner.unknown .big { color: #fca5a5; }
+  #banner:not(.unknown) .big { color: #6ee7b7; }
+  #banner img { width: 64px; height: 64px; border-radius: 10px; object-fit: cover; border: 1px solid var(--line); }
+  /* bottom telemetry bar */
+  .telemetry {
+    position: absolute; bottom: 16px; left: 22px; right: 22px; z-index: 6;
+    display: flex; gap: 18px; align-items: center;
+    font-size: 11px; color: var(--muted);
+    background: rgba(5,8,15,.65); border: 1px solid var(--line);
+    border-radius: 10px; padding: 8px 14px; backdrop-filter: blur(4px);
+    font-variant-numeric: tabular-nums;
+  }
+  .telemetry b { color: var(--text); font-weight: 650; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; margin-right: 6px; }
+  .dot.busy { background: var(--warn); }
+  /* ===== side panel ===== */
+  aside {
+    border-left: 1px solid var(--line);
+    background: var(--panel);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .tab {
+    flex: 1; padding: 13px 6px; text-align: center; cursor: pointer;
+    color: var(--muted); font-size: 12.5px; font-weight: 650; letter-spacing: .3px;
+    border-bottom: 2px solid transparent; user-select: none;
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); background: rgba(16,185,129,.05); }
+  .tab-body { flex: 1; overflow-y: auto; padding: 16px; min-height: 0; }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+  /* enroll */
+  label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; display: block; margin: 12px 0 5px; }
+  input[type=text] {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 8px; padding: 10px 12px; font-size: 14px; outline: none;
+  }
+  input[type=text]:focus { border-color: var(--accent-2); }
+  .shots { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .shot {
+    width: 64px; height: 64px; border-radius: 8px; border: 1px dashed var(--line);
+    background: var(--panel-2); display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 10px; overflow: hidden;
+  }
+  .shot img { width: 100%; height: 100%; object-fit: cover; }
+  .row { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+  .hint { font-size: 11px; color: var(--muted); line-height: 1.5; margin-top: 10px; }
+  /* check-in list */
+  .log-item {
+    display: flex; align-items: center; gap: 10px; padding: 9px 10px;
+    border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px;
+    background: var(--panel-2);
+  }
+  .log-item img { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; }
+  .log-item .n { font-weight: 650; font-size: 13px; }
+  .log-item .m { font-size: 10.5px; color: var(--muted); }
+  .log-item time { margin-left: auto; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 34px 10px; line-height: 1.7; }
+  /* database */
+  .db-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px;
+    border-radius: 10px; border: 1px solid transparent;
+  }
+  .db-item:hover { background: var(--panel-2); border-color: var(--line); }
+  .db-item img { width: 46px; height: 46px; border-radius: 50%; object-fit: cover; }
+  .db-item .n { font-size: 13px; font-weight: 650; }
+  .db-item .m { font-size: 10.5px; color: var(--muted); }
+  .db-item button { margin-left: auto; }
+  .icon-btn { background: transparent; border: 1px solid transparent; color: var(--muted); border-radius: 8px; padding: 6px 9px; cursor: pointer; font-size: 13px; }
+  .icon-btn:hover { color: var(--danger); border-color: var(--danger); }
+  /* settings */
+  .setting { margin-bottom: 14px; }
+  .setting .row-label { display: flex; justify-content: space-between; align-items: center; font-size: 12px; margin-bottom: 6px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  select, .toggle { width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 9px 10px; font-size: 13px; }
+  .switch-row { display: flex; align-items: center; justify-content: space-between; }
+  .toggle { width: auto; transform: scale(1.15); accent-color: var(--accent); cursor: pointer; }
+  .divider { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+  .toast {
+    position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%);
+    background: #0f2c1f; color: #6ee7b7; border: 1px solid rgba(16,185,129,.45);
+    padding: 10px 18px; border-radius: 10px; font-size: 13px; z-index: 10; display: none;
+  }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #22304f; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">F</div>
+  <h1>FaceX Check-In <small>· offline face-ID booth</small></h1>
+  <span class="pill">● 100% OFFLINE</span>
+  <div class="spacer"></div>
+  <div class="hdr-stat">
+    <div>Model load: <b id="statLoad">—</b></div>
+    <div>DB: <b id="statDb">0</b> enrolled · Search: <b id="statSearch">—</b></div>
+  </div>
+</header>
+
+<main>
+  <!-- ===== camera booth ===== -->
+  <section class="stage">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="banner">
+      <img id="bannerImg" alt="" />
+      <div>
+        <div class="big" id="bannerName">—</div>
+        <div class="sub" id="bannerSub">—</div>
+      </div>
+    </div>
+
+    <div class="stage-cta" id="cta">
+      <button class="btn" id="btnStart" style="font-size:16px; padding:16px 34px">▶ Start Camera</button>
+      <p>Camera frames never leave this device. Matching runs 100% locally.</p>
+    </div>
+
+    <div class="telemetry">
+      <span><span class="dot" id="liveDot"></span><b id="statState">idle</b></span>
+      <span>Frame pipeline: <b id="statMs">— ms</b></span>
+      <span>Detect: <b id="statDet">—</b></span>
+      <span>Embed: <b id="statEmb">—</b></span>
+      <span>Search: <b id="statSearch2">—</b></span>
+      <span>Faces/s: <b id="statFps">—</b></span>
+    </div>
+    <div class="toast" id="toast"></div>
+  </section>
+
+  <!-- ===== side panel ===== -->
+  <aside>
+    <div class="tabs">
+      <div class="tab active" data-tab="checkin">Check-in</div>
+      <div class="tab" data-tab="enroll">Enroll</div>
+      <div class="tab" data-tab="database">Database</div>
+      <div class="tab" data-tab="settings">Settings</div>
+    </div>
+
+    <div class="tab-body">
+      <!-- check-in tab -->
+      <div class="tab-pane active" id="pane-checkin">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px">
+          <strong style="font-size:13px">Today · <span id="todayCount">0</span> checked in</strong>
+          <div style="display:flex; gap:6px">
+            <button class="btn secondary small" id="btnExportCsv">Export CSV</button>
+            <button class="btn ghost small" id="btnClearLogs">Clear log</button>
+          </div>
+        </div>
+        <div id="logList"><div class="empty">No check-ins yet.<br/>Stand in front of the camera and hold still.</div></div>
+      </div>
+
+      <!-- enroll tab -->
+      <div class="tab-pane" id="pane-enroll">
+        <label for="fName">Full name</label>
+        <input type="text" id="fName" placeholder="e.g. Aditi Sharma" autocomplete="off" />
+        <label for="fRoll">Roll / ID</label>
+        <input type="text" id="fRoll" placeholder="e.g. CS2023-0142" autocomplete="off" />
+        <button class="btn" id="btnCapture" style="width:100%; margin-top:12px">📷 Capture shot (0/5)</button>
+        <div class="shots" id="shotStrip"></div>
+        <div class="row">
+          <button class="btn secondary" id="btnResetShots" style="flex:1">Reset shots</button>
+          <button class="btn" id="btnSaveStudent" style="flex:2" disabled>Save student</button>
+        </div>
+        <p class="hint">Tip: capture 3–5 shots with small head-angle and lighting changes — the averaged embedding is much more robust than a single shot.</p>
+
+        <hr class="divider" />
+        <label>Enroll from photos (batch)</label>
+        <input type="file" id="batchPhotos" accept="image/*" multiple style="font-size:12px; color:var(--muted)" />
+        <p class="hint">Pick photos named <b>Roll_Name.jpg</b> (e.g. <code>CS2023-0142_Aditi_Sharma.jpg</code>). One face per photo.</p>
+        <button class="btn secondary small" id="btnBatchEnroll">Enroll batch</button>
+        <span id="batchStatus" class="hint" style="display:block"></span>
+      </div>
+
+      <!-- database tab -->
+      <div class="tab-pane" id="pane-database">
+        <input type="text" id="dbSearch" placeholder="Search name or roll…" />
+        <div id="dbList" style="margin-top:10px"><div class="empty">Database is empty.</div></div>
+        <hr class="divider" />
+        <div class="row">
+          <button class="btn secondary small" id="btnExportDb">Export DB (.json)</button>
+          <button class="btn secondary small" id="btnImportDb">Import DB</button>
+          <button class="btn danger small" id="btnWipeDb">Wipe DB</button>
+        </div>
+        <input type="file" id="importFile" accept="application/json" hidden />
+        <p class="hint">Export/import moves the whole enrolled roster between devices — fully offline, via file.</p>
+      </div>
+
+      <!-- settings tab -->
+      <div class="tab-pane" id="pane-settings">
+        <div class="setting">
+          <div class="row-label"><span>Match threshold (cosine)</span><b id="thrVal">0.25</b></div>
+          <input type="range" id="thrSlider" min="0.10" max="0.60" step="0.01" value="0.25" />
+          <p class="hint">Higher = stricter (fewer false accepts, more false rejects). LFW-verified grid (1800 pairs): 0.20→FRR 21%/FAR 39% · 0.25→27%/29% · 0.30→36%/22% · 0.40→52%/10%. Frontal booth + multi-shot enrollment separates much better than wild LFW photos; tune on your own roster.</p>
+        </div>
+
+        <div class="setting">
+          <div class="row-label"><span>Recognition engine</span></div>
+          <select id="engineSelect">
+            <option value="sdk" selected>EdgeFace-XS — WASM SDK, 5-point aligned (recommended)</option>
+            <option value="tiny">facex_tiny — ONNX, ~87% LFW-verified (fallback)</option>
+            <option value="nano">facex_nano — ONNX, ~83% LFW-verified, fastest</option>
+          </select>
+          <p class="hint">The SDK path aligned-crops faces the way the model was trained — dramatically better match separation (0.70 genuine vs 0.05 impostor on LFW). Switching loads the engine lazily.</p>
+        </div>
+
+        <div class="setting switch-row">
+          <span style="font-size:13px">Anti-spoof (MiniFASNet ensemble)</span>
+          <input type="checkbox" id="spoofToggle" class="toggle" />
+        </div>
+        <p class="hint">Rejects printed photos / screen replays. Adds ~2 ms per frame but blocks the classic "photo check-in".</p>
+
+        <div class="setting switch-row">
+          <span style="font-size:13px">Require 3 consecutive matches</span>
+          <input type="checkbox" id="multiFrameToggle" class="toggle" checked />
+        </div>
+
+        <div class="setting">
+          <div class="row-label"><span>Re-check cooldown</span><b id="cooldownVal">5 min</b></div>
+          <input type="range" id="cooldownSlider" min="0" max="30" step="1" value="5" />
+          <p class="hint">Ignore repeat detections of the same person for this many minutes (prevents double check-ins).</p>
+        </div>
+
+        <hr class="divider" />
+        <label>Quick test with an image</label>
+        <input type="file" id="testPhoto" accept="image/*" style="font-size:12px; color:var(--muted)" />
+        <div class="hint" id="testPhotoResult">Run a still photo through the exact same detect → embed → match pipeline used on the booth feed.</div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script src="sdk/detect.js"></script>
+<script src="sdk/facex.js"></script>
+<script src="sdk/align.js"></script>
+<script src="sdk/facex-sdk.js"></script>
+<script src="ort/ort.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

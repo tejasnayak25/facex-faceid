@@ -1,0 +1,26 @@
+# dependencies (reinstalled via npm install / scripts/setup.mjs)
+node_modules/
+
+# large vendored runtime — produced by scripts/setup.mjs from node_modules
+ort/
+
+# model weights — downloaded by scripts/setup.mjs (or built locally)
+models/edgeface_xs_fp32.bin
+models/facex_detect.enc
+models/facex_tiny.enc
+models/facex_nano.enc
+models/minifasnet_v2_27.enc
+models/minifasnet_v1se_40.enc
+
+# datasets & big local artifacts (download separately, see README)
+data/
+*.tgz
+
+# scratch / generated
+wfpairs.json
+smoke.png
+import_db*.json
+*.ppm
+*.tmp
+Thumbs.db
+.DS_Store

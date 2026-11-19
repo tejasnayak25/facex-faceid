@@ -1,0 +1,21 @@
+{
+  "name": "facex-checkin",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Offline face-ID check-in booth prototype built on FaceX (EdgeFace-XS, WASM, 100% local)",
+  "license": "Apache-2.0",
+  "scripts": {
+    "setup": "npm install --no-audit --no-fund && node scripts/setup.mjs",
+    "start": "python -m http.server 8080",
+    "test:dataset": "node tools/dataset_test.mjs",
+    "test:e2e": "node tools/smoke.mjs"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.21.0"
+  },
+  "devDependencies": {
+    "onnxruntime-node": "1.21.0",
+    "jpeg-js": "0.4.4",
+    "playwright-core": "^1.56.0"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "dataset": "LFW deepfunneled",
+  "cohort": {
+    "enrolled": 40,
+    "queries": 234,
+    "impostors": 499,
+    "processed": 274,
+    "noFace": 0
+  },
+  "accuracy": {
+    "top1_pct": 41.88,
+    "top5_pct": 59.4,
+    "top1_hits": 98,
+    "queries": 234
+  },
+  "impostors": {
+    "n": 499,
+    "mean": 0.4613,
+    "max": 0.7375,
+    "accepted_at": {
+      "0.25": "462/499 (92.6%)",
+      "0.3": "435/499 (87.2%)",
+      "0.35": "403/499 (80.8%)",
+      "0.4": "356/499 (71.3%)",
+      "0.45": "303/499 (60.7%)"
+    }
+  },
+  "latency_ms": {
+    "detect": {
+      "p50": 102.4,
+      "p95": 123.92
+    },
+    "embed": {
+      "p50": 105.16,
+      "p95": 127.31
+    },
+    "pipeline_total": {
+      "p50": 286.89,
+      "p95": 326.38
+    },
+    "search_gallery_us": {
+      "p50": 120,
+      "p95": 3170,
+      "gallery": 40
+    },
+    "search_100k_ms": 193.8
+  }
+}
