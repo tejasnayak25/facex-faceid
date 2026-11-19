@@ -59,6 +59,8 @@ for (const f of ORT_FILES) {
 console.log('2/3  Downloading model weights');
 fs.mkdirSync(modelsDir, { recursive: true });
 const MODELS = [
+  { file: 'yunet_2023mar_int8.onnx', url: 'https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar_int8.onnx', bytes: 100416 },
+  { file: 'sface_int8.onnx',      url: 'https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_recognition_sface/face_recognition_sface_2021dec_int8.onnx', bytes: 9896933 },
   { file: 'edgeface_xs_fp32.bin', url: 'https://github.com/facex-engine/facex/releases/download/v1.0.0/edgeface_xs_fp32.bin', bytes: 7133584 },
   { file: 'facex_detect.enc',     url: 'https://raw.githubusercontent.com/facex-engine/facex/main/docs/demo/facex_detect.enc', bytes: 410722 },
   { file: 'facex_tiny.enc',       url: 'https://raw.githubusercontent.com/facex-engine/facex/main/docs/demo/facex_tiny.enc', bytes: 1809249 },

@@ -16,6 +16,7 @@ This project bundles or downloads the following third-party works. Licenses appl
 |---|---|---|
 | onnxruntime-web runtime | npm `onnxruntime-web` 1.21.0 (Microsoft) → `ort/` | MIT |
 | EdgeFace-XS embedder weights | [Facex release v1.0.0](https://github.com/facex-engine/facex/releases) `edgeface_xs_fp32.bin` | Apache 2.0 (author's trained weights, per FaceX repo README) |
+| SFace recognizer (INT8) | [OpenCV Zoo](https://github.com/opencv/opencv_zoo) `face_recognition_sface_2021dec_int8.onnx` → `models/sface_int8.onnx` | Apache 2.0 (OpenCV) |
 | FaceX detector (ONNX) | `facex_detect.enc` — FaceX repo `docs/demo/` (AES-256-GCM, decrypted in-browser) | Apache 2.0 (author's trained model) |
 | FaceX recognizer (ONNX) | `facex_tiny.enc`, `facex_nano.enc` — FaceX repo `docs/demo/` | Apache 2.0 (author's trained models) |
 | MiniFASNet anti-spoof | `minifasnet_v2_27.enc`, `minifasnet_v1se_40.enc` — FaceX repo `docs/demo/` | Apache 2.0 (© MinivisionAI, via FaceX) |

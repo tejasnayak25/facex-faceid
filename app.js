@@ -44,6 +44,112 @@ recCv.width = 112; recCv.height = 112;
 const recCtx = recCv.getContext('2d', { willReadFrequently: true });
 const recInput = new Float32Array(3 * 112 * 112);
 
+const sfaceCv = document.createElement('canvas');
+sfaceCv.width = 112; sfaceCv.height = 112;
+const sfaceCtx = sfaceCv.getContext('2d', { willReadFrequently: true });
+const sfaceInput = new Float32Array(3 * 112 * 112);
+
+let sfaceSess = null;
+async function ensureSface() {
+  if (sfaceSess) return sfaceSess;
+  sfaceSess = await ort.InferenceSession.create(
+    await (await fetch('models/sface_int8.onnx')).arrayBuffer(),
+    { executionProviders: ['wasm'] }
+  );
+  return sfaceSess;
+}
+
+let yunetSess = null;
+async function ensureYuNet() {
+  if (yunetSess) return yunetSess;
+  yunetSess = await ort.InferenceSession.create(
+    await (await fetch('models/yunet_2023mar_int8.onnx')).arrayBuffer(),
+    { executionProviders: ['wasm'] }
+  );
+  return yunetSess;
+}
+
+// YuNet ONNX decoder — OpenCV's FaceDetectorYN (640x640 input, raw 0-255 RGB)
+async function detectYuNet(src) {
+  const sess = await ensureYuNet();
+  const srcW = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoWidth || src.naturalWidth) : src.width;
+  const srcH = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoHeight || src.naturalHeight) : src.height;
+  const detSize = 640;
+  // Letterbox to 640x640 (top-left, black borders)
+  const cv = document.createElement('canvas');
+  cv.width = detSize; cv.height = detSize;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, detSize, detSize);
+  const scale = Math.min(detSize / srcW, detSize / srcH);
+  const nw = Math.round(srcW * scale), nh = Math.round(srcH * scale);
+  const dx = 0, dy = 0;
+  ctx.drawImage(src, dx, dy, nw, nh);
+  const imgData = ctx.getImageData(0, 0, detSize, detSize).data;
+  const N = detSize * detSize;
+  const input = new Float32Array(3 * N);
+  for (let i = 0, p = 0; i < N; i++) {
+    input[i] = imgData[p]; input[N + i] = imgData[p + 1]; input[2 * N + i] = imgData[p + 2];
+    p += 4;
+  }
+  const t = new ort.Tensor('float32', input, [1, 3, detSize, detSize]);
+  const o = await sess.run({ input: t });
+  const strides = [8, 16, 32];
+  const dets = [];
+  for (let si = 0; si < 3; si++) {
+    const s = strides[si];
+    const cls = o['cls_' + s].data;
+    const obj = o['obj_' + s].data;
+    const bbox = o['bbox_' + s].data;
+    const kpsData = o['kps_' + s].data;
+    const cols = detSize / s, rows = detSize / s;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const idx = r * cols + c;
+        const clsScore = Math.min(1, Math.max(0, cls[idx]));
+        const objScore = Math.min(1, Math.max(0, obj[idx]));
+        const score = Math.sqrt(clsScore * objScore);
+        if (score < 0.5) continue;
+        const cx = (c + bbox[idx * 4 + 0]) * s;
+        const cy = (r + bbox[idx * 4 + 1]) * s;
+        const w = Math.exp(bbox[idx * 4 + 2]) * s;
+        const h = Math.exp(bbox[idx * 4 + 3]) * s;
+        const x1 = (cx - w / 2 - dx) / scale;
+        const y1 = (cy - h / 2 - dy) / scale;
+        const x2 = (cx + w / 2 - dx) / scale;
+        const y2 = (cy + h / 2 - dy) / scale;
+        // YuNet kps: [re, le, nt, rcm, lcm] in (kps_v + grid) * stride
+        // In image coords: re=left eye, le=right eye, nt=nose, rcm=left mouth, lcm=right mouth
+        // This is ALREADY ArcFace order [left_eye, right_eye, nose, left_mouth, right_mouth]
+        const kpsArr = [];
+        for (let n = 0; n < 5; n++) {
+          const kx = (kpsData[idx * 10 + 2 * n] + c) * s - dx;
+          const ky = (kpsData[idx * 10 + 2 * n + 1] + r) * s - dy;
+          kpsArr.push([kx / scale, ky / scale]);
+        }
+        dets.push({ x1, y1, x2, y2, score, kps: kpsArr.flat() });
+      }
+    }
+  }
+  // NMS
+  dets.sort((a, b) => b.score - a.score);
+  const kept = [];
+  while (dets.length) {
+    const d = dets.shift();
+    kept.push(d);
+    for (let i = dets.length - 1; i >= 0; i--) {
+      const e = dets[i];
+      const ix1 = Math.max(d.x1, e.x1), iy1 = Math.max(d.y1, e.y1);
+      const ix2 = Math.min(d.x2, e.x2), iy2 = Math.min(d.y2, e.y2);
+      const iw = Math.max(0, ix2 - ix1), ih = Math.max(0, iy2 - iy1);
+      const inter = iw * ih;
+      const u = (d.x2 - d.x1) * (d.y2 - d.y1) + (e.x2 - e.x1) * (e.y2 - e.y1) - inter;
+      if (inter / (u || 1e-6) > 0.3) dets.splice(i, 1);
+    }
+  }
+  // Scale kps back to source coords (already done above)
+  return kept;
+}
+
 const spoofCv = document.createElement('canvas');
 spoofCv.width = 80; spoofCv.height = 80;
 const spoofCtx = spoofCv.getContext('2d', { willReadFrequently: true });
@@ -241,6 +347,47 @@ async function analyzeSource(src) {
       totalMs: performance.now() - t0,
     };
   }
+  if (state.engine === 'sface') {
+    const t0 = performance.now();
+    await ensureSface();
+    await ensureYuNet();
+    const faces = await detectYuNet(src);   // OpenCV YuNet ONNX → 5 kps in ArcFace order
+    const embeddings = [];
+    for (const f of faces) {
+      const srcW = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoWidth || src.naturalWidth) : src.width;
+      const srcH = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoHeight || src.naturalHeight) : src.height;
+      // draw source into a canvas alignFace can read from
+      const srcCv = document.createElement('canvas');
+      srcCv.width = srcW; srcCv.height = srcH;
+      const srcCtx = srcCv.getContext('2d', { willReadFrequently: true });
+      srcCtx.drawImage(src, 0, 0);
+      // 5-point alignment to 112x112 (same ArcFace template as the SDK path)
+      const kps5 = [];
+      for (let i = 0; i < 5; i++) kps5.push([f.kps[i * 2], f.kps[i * 2 + 1]]);
+      alignFace(srcCtx, srcW, srcH, kps5, sfaceCtx);
+      // SFace (OpenCV FaceRecognizerSF): blobFromImage(img, 1, Size(112,112), Scalar(0,0,0), true, false)
+      // → RGB channel order (swapRB), NO normalization, raw 0-255 float, CHW
+      const imgData = sfaceCtx.getImageData(0, 0, 112, 112).data;
+      const N = 112 * 112;
+      for (let i = 0, p = 0; i < N; i++) {
+        sfaceInput[i]         = imgData[p];       // R
+        sfaceInput[N + i]     = imgData[p + 1];   // G
+        sfaceInput[2 * N + i] = imgData[p + 2];   // B
+        p += 4;
+      }
+      const t = new ort.Tensor('float32', sfaceInput, [1, 3, 112, 112]);
+      const o = await sfaceSess.run({ data: t });
+      const out = o['fc1'].data;
+      embeddings.push(Float32Array.from(out));
+    }
+    return {
+      faces: faces.map(f => ({ x1: f.x1, y1: f.y1, x2: f.x2, y2: f.y2, score: f.score })),
+      embeddings,
+      detMs: 0,
+      totalMs: performance.now() - t0,
+    };
+  }
+
   // ONNX fallback (tiny/nano)
   const td0 = performance.now();
   const faces = await detectFaces(src);
@@ -305,11 +452,11 @@ const state = {
   running: false,
   processing: false,
   lastFrameAt: 0,
-  threshold: 0.25,
+  threshold: 0.32,
   cooldownMin: 5,
   multiFrame: true,
   spoofEnabled: false,
-  engine: 'sdk',              // 'sdk' = EdgeFace-XS aligned WASM | 'tiny'/'nano' = ONNX
+  engine: 'sdk',              // 'sdk' = EdgeFace-XS aligned WASM | 'sface' = SFace (OpenCV, Apache 2.0) | 'tiny'/'nano' = ONNX
   recognitionModel: 'tiny',
   consecutive: { id: null, count: 0 },
   cooldowns: new Map(),   // roll -> last check-in ts
@@ -348,6 +495,7 @@ function bestMatch(emb) {
   let best = null, bestScore = -1;
   const t0 = performance.now();
   for (const s of state.students) {
+    if (s.embedding.length !== emb.length) continue;   // skip cross-engine records
     const sc = cosine(emb, s.embedding);
     if (sc > bestScore) { bestScore = sc; best = s; }
   }
@@ -748,9 +896,13 @@ async function loadCoreModels() {
   const t0 = performance.now();
   setStat('#statState', 'loading models…');
   $('#liveDot').classList.add('busy');
-  if (state.engine === 'sdk') {
+  if (state.engine === 'sdk' || state.engine === 'sface') {
     await ensureSdk();
-  } else {
+  }
+  if (state.engine === 'sface') {
+    await ensureSface();
+  }
+  if (state.engine === 'tiny' || state.engine === 'nano') {
     state.detSess = await loadEncryptedSession('models/facex_detect.enc');
     state.recSess = await loadEncryptedSession(`models/facex_${state.recognitionModel}.enc`);
   }
@@ -768,17 +920,19 @@ async function switchEngine(value) {
   localStorage.setItem('fx_model', value);
   warnEngineMismatch();
   const t0 = performance.now();
-  if (value === 'sdk') {
+  if (value === 'sdk' || value === 'sface') {
     await ensureSdk();
-    setStat('#statLoad', ((performance.now() - t0) / 1000).toFixed(2) + ' s');
-    toast('Recognition engine → EdgeFace-XS (aligned)');
-  } else {
+  }
+  if (value === 'sface') {
+    await ensureSface();
+  }
+  if (value === 'tiny' || value === 'nano') {
     if (!state.detSess) state.detSess = await loadEncryptedSession('models/facex_detect.enc');
     state.recognitionModel = value;
     state.recSess = await loadEncryptedSession(`models/facex_${value}.enc`);
-    setStat('#statLoad', ((performance.now() - t0) / 1000).toFixed(2) + ' s (rec only)');
-    toast(`Recognition engine → facex_${value}`);
   }
+  setStat('#statLoad', ((performance.now() - t0) / 1000).toFixed(2) + ' s');
+  toast(`Recognition engine → ${value === 'sdk' ? 'EdgeFace-XS (aligned)' : value === 'sface' ? 'SFace (OpenCV, Apache 2.0)' : 'facex_' + value}`);
 }
 
 // ---------- wiring ----------
@@ -859,6 +1013,7 @@ function restoreSettings() {
   ort.env.wasm.wasmPaths = new URL('ort/', window.location.href).href;
   ort.env.wasm.numThreads = 1;   // threads need COOP/COEP headers; single-threaded wasm is plenty
   ort.env.wasm.simd = true;
+  ort.env.logLevel = 'error';   // SFace int8 ONNX (OpenCV export) emits harmless const-folding warnings
 
   restoreSettings();
   bindUI();

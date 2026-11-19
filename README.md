@@ -33,7 +33,7 @@ Open **http://localhost:8080** in a Chromium browser (Edge/Chrome) and press **S
 2. Back to the booth → look at the camera → green banner + chime = checked in.
 3. Check-in tab shows today's log; *Export CSV* downloads it. *Database* tab searches/removes students; *Export DB / Import DB* moves the roster between devices (JSON file, offline).
 
-**Engine**: *Settings → Recognition engine* — **EdgeFace-XS WASM SDK** (default, recommended), `facex_tiny` ONNX, or `facex_nano` ONNX.
+**Engine**: *Settings → Recognition engine* — **EdgeFace-XS WASM SDK** (default, recommended), **SFace** (OpenCV, Apache 2.0, 99% LFW, now with OpenCV YuNet detector), `facex_tiny` ONNX, or `facex_nano` ONNX.
 **Anti-spoof** (photo/screen replay rejection, MiniFASNet ensemble): *Settings → Anti-spoof* (~2 ms extra per frame).
 **Match threshold**: *Settings* slider, default 0.25. **Re-check cooldown** (avoid double check-ins): default 5 min.
 
@@ -61,7 +61,17 @@ Open **http://localhost:8080** in a Chromium browser (Edge/Chrome) and press **S
 
 genuine mean 0.489 · impostor mean 0.019 (max 0.321) · **AUC 0.981**
 
-Verified end-to-end in a headless browser (fake camera): enrollment → IndexedDB roster → same-person photo matches (**69.8%**), different person rejected (**5%**), anti-spoof loads without errors, zero console errors.
+Verified end-to-end in a headless browser (fake camera): enrollment → IndexedDB roster → same-person photo matches (**69.8%** for SDK, **64.1%** for SFace), different person rejected (**5%** for SDK, **0.9%** for SFace), anti-spoof loads without errors, zero console errors.
+
+**SFace engine (OpenCV, Apache 2.0)** — verified in Python (OpenCV 4.13) on the full 6,000-pair LFW protocol:
+
+| Threshold | FRR (miss) | FAR (impostor) |
+|---|---|---|
+| 0.25 | 9.3% | 1.7% |
+| 0.30 | 11.7% | 0.3% |
+| 0.35 | 18.3% | 0.0% |
+
+genuine mean 0.648 (min -0.148) · impostor mean 0.090 (max 0.358) · **AUC 0.9955** · **10-fold CV 98.98% ± 0.24%** (mean best threshold 0.323)
 
 **ONNX fallback (facex_tiny, measured)** — official pairs, authors' exact protocol: **86.6% ± 1.7** (genuine 0.55 / impostor 0.21). Authors' README claimed 96.85% — not reproducible with the shipped `facex_tiny.enc`. On the app's 1.3×-bbox crop path: AUC ≈ 0.79 (impostor mean 0.17, max 0.68).
 
@@ -72,6 +82,28 @@ Verified end-to-end in a headless browser (fake camera): enrollment → IndexedD
 Memory: enrolled roster is 512 floats/student (2 KB) — 12,500 students ≈ **25 MB**, trivial for IndexedDB. No FAISS needed at this scale.
 
 ---
+
+## Layout
+
+```
+checkin/
+├── index.html            # booth UI (all-local, no external assets)
+├── app.js                # pipeline + IndexedDB + booth loop + engine wiring
+├── build_db.worker.html  # headless worker used by tools/build_db.mjs
+├── sdk/                  # patched FaceX WASM SDK: detect.js/.wasm, facex.js/.wasm,
+│                         # align.js, facex-sdk.js (SIMD gate fixed, raw-uint8 input,
+│                         # detect_run export, HEAPF32 export)
+├── scripts/setup.mjs     # one-command fresh-clone setup (copies ort/, downloads models)
+├── models/yunet_fp32.bin # committed (Apache 2.0, OpenCV Zoo-derived)
+├── results/              # ONNX-path benchmark output (LFW)
+├── tools/                # build_db.mjs, smoke.mjs, verify_import.mjs, sdk_lfw.mjs,
+│                         # sdk_lfw.html, dataset_test.mjs, eval_lfw.py, eval_sface.py,
+│                         # shots.mjs
+├── LICENSE               # Apache 2.0 (this project)
+└── THIRD-PARTY-NOTICES.md
+```
+
+`data/`, `ort/`, `models/edgeface_xs_fp32.bin` etc. are git-ignored — download LFW/roster data separately and restore weights with `npm run setup`. Screenshots (`shot_*.png`) are kept for reference.
 
 ## Importing your roster (named folders)
 
