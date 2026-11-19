@@ -21,10 +21,12 @@ Everything is served locally; no network requests are made at runtime (onnxrunti
 git clone <your-repo-url> facex-checkin
 cd facex-checkin
 npm run setup     # npm install + downloads model weights + copies onnxruntime-web into ort/
-python -m http.server 8080
+npm run serve     # dev server with COOP/COEP headers → multi-threaded WASM
 ```
 
-Open **http://localhost:8080** in a Chromium browser (Edge/Chrome) and press **Start Camera**. Camera access requires localhost or HTTPS — a plain `file://` page won't work. (`npm run setup` needs ~10 MB of downloads; everything runs offline afterwards.)
+Open **http://localhost:8080** in a Chromium browser (Edge/Chrome) and press **Start Camera**. Camera access requires localhost or HTTPS — a plain `file://` page won't work. (`npm run serve` needs ~10 MB of downloads on first run via `npm run setup`; everything runs offline afterwards.)
+
+> **Why `npm run serve` instead of `python -m http.server`?** Threaded WASM needs `SharedArrayBuffer`, which requires `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers. The Python server sends none, so `ort.env.wasm.numThreads` stays at 1 (single-threaded, ~2-4x slower). `npm run serve` sends the right headers and enables up to 4 threads. You can still use `python -m http.server` for a quick look — the booth works, just slower.
 
 **First-time flow**
 1. **Enroll** tab → enter name + roll → capture 3–5 shots (small angle/lighting variations) → *Save student*.

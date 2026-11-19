@@ -1011,7 +1011,9 @@ function restoreSettings() {
 (async function init() {
   // offline wasm runtime — resolve against the page URL so sub-path hosting works too
   ort.env.wasm.wasmPaths = new URL('ort/', window.location.href).href;
-  ort.env.wasm.numThreads = 1;   // threads need COOP/COEP headers; single-threaded wasm is plenty
+  ort.env.wasm.numThreads = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated)
+    ? Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1))
+    : 1;
   ort.env.wasm.simd = true;
   ort.env.logLevel = 'error';   // SFace int8 ONNX (OpenCV export) emits harmless const-folding warnings
 
