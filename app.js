@@ -559,6 +559,7 @@ function ewma(key, v) { state.ewma[key] = state.ewma[key] ? state.ewma[key] * 0.
 
 // true cosine similarity (handles non-unit embeddings, e.g. the SDK's EdgeFace-XS)
 function cosine(a, b) {
+  if (!a || !b || a.length !== b.length) return -1;
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
   const denom = Math.sqrt(na * nb);
@@ -913,7 +914,7 @@ async function importDb(file) {
   let n = 0;
   for (const s of data.students || []) {
     const emb = s.embedding instanceof Array ? Float32Array.from(s.embedding) : null;
-    if (!emb || (emb.length !== 512 && emb.length !== 256)) continue;
+    if (!emb || (emb.length !== 512 && emb.length !== 256 && emb.length !== 128)) continue;
     await idb.studentAdd({ name: s.name || 'Unnamed', roll: s.roll || '?', embedding: emb, thumb: s.thumb || '', shots: s.shots || 1, enrolledAt: s.enrolledAt || Date.now(), engine: s.engine || 'tiny' });
     n++;
   }

@@ -9,7 +9,7 @@
 */
 importScripts('ort/ort.all.min.js');
 
-// AlignFace (ArcFace 5-point similarity transform) — pure JS, works with OffscreenCanvas
+// AlignFace (ArcFace 5-point similarity transform) — pure JS, writes directly to dst Float32Array (CHW)
 function getSimilarityTransform(src, dst) {
   const n = src.length;
   let sx = 0, sy = 0, dx = 0, dy = 0;
@@ -29,16 +29,15 @@ function getSimilarityTransform(src, dst) {
   return [a, b, tx, ty];
 }
 
-function alignFace(srcCtx, srcW, srcH, kps, dstCtx) {
+function alignFaceDirect(src, srcW, srcH, kps, dst) {
   const REF = [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]];
   const [a, b, tx, ty] = getSimilarityTransform(kps, REF);
   const det = a * a + b * b;
   const ai = a / det, bi = b / det;
   const txi = -(ai * tx + bi * ty);
   const tyi = (bi * tx - ai * ty);
-  const srcData = srcCtx.getImageData(0, 0, srcW, srcH);
-  const dstData = dstCtx.createImageData(112, 112);
-  const src = srcData.data, dst = dstData.data;
+  const M = 112 * 112;
+
   for (let dy = 0; dy < 112; dy++) {
     for (let dx = 0; dx < 112; dx++) {
       const sx = ai * dx - bi * dy + txi;
@@ -46,30 +45,35 @@ function alignFace(srcCtx, srcW, srcH, kps, dstCtx) {
       const x0 = Math.floor(sx), y0 = Math.floor(sy);
       const x1 = x0 + 1, y1 = y0 + 1;
       const fx = sx - x0, fy = sy - y0;
+      const di = dy * 112 + dx;
       if (x0 >= 0 && x1 < srcW && y0 >= 0 && y1 < srcH) {
         const i00 = (y0 * srcW + x0) * 4;
         const i10 = (y0 * srcW + x1) * 4;
         const i01 = (y1 * srcW + x0) * 4;
         const i11 = (y1 * srcW + x1) * 4;
-        const di = (dy * 112 + dx) * 4;
-        for (let c = 0; c < 3; c++) {
-          dst[di + c] = Math.round(
-            src[i00 + c] * (1 - fx) * (1 - fy) +
-            src[i10 + c] * fx * (1 - fy) +
-            src[i01 + c] * (1 - fx) * fy +
-            src[i11 + c] * fx * fy
-          );
-        }
-        dst[di + 3] = 255;
+        const w00 = (1 - fx) * (1 - fy);
+        const w10 = fx * (1 - fy);
+        const w01 = (1 - fx) * fy;
+        const w11 = fx * fy;
+        dst[di] = src[i00] * w00 + src[i10] * w10 + src[i01] * w01 + src[i11] * w11;
+        dst[M + di] = src[i00 + 1] * w00 + src[i10 + 1] * w10 + src[i01 + 1] * w01 + src[i11 + 1] * w11;
+        dst[2 * M + di] = src[i00 + 2] * w00 + src[i10 + 2] * w10 + src[i01 + 2] * w01 + src[i11 + 2] * w11;
+      } else {
+        dst[di] = 0;
+        dst[M + di] = 0;
+        dst[2 * M + di] = 0;
       }
     }
   }
-  dstCtx.putImageData(dstData, 0, 0);
-  return dstData;
 }
 
 let yunetSess = null;
 let sfaceSess = null;
+let srcCv = null, srcCtx = null;
+let detCv = null, detCtx = null;
+const detSize = 640;
+const detInput = new Float32Array(3 * detSize * detSize);
+const sfaceInput = new Float32Array(3 * 112 * 112);
 
 async function init() {
   ort.env.wasm.wasmPaths = new URL('ort/', self.location.href).href;
@@ -87,55 +91,36 @@ async function init() {
   self.postMessage({ type: 'ready' });
 }
 
-function detectYuNet(imgData, srcW, srcH) {
-  const detSize = 640;
-  const cv = new OffscreenCanvas(detSize, detSize);
-  const ctx = cv.getContext('2d');
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, detSize, detSize);
-  const scale = Math.min(detSize / srcW, detSize / srcH);
-  const nw = Math.round(srcW * scale), nh = Math.round(srcH * scale);
-  const dx = 0, dy = 0;
-  // Draw from ImageData (we'll pass a canvas instead — but worker has no Image)
-  // Actually we receive raw RGBA pixels; draw via putImageData on a temp canvas
-  const srcCv = new OffscreenCanvas(srcW, srcH);
-  const srcCtx = srcCv.getContext('2d');
-  srcCtx.putImageData(new ImageData(new Uint8ClampedArray(imgData), srcW, srcH), 0, 0);
-  ctx.drawImage(srcCv, dx, dy, nw, nh);
-  const data = ctx.getImageData(0, 0, detSize, detSize).data;
-  const N = detSize * detSize;
-  const input = new Float32Array(3 * N);
-  for (let i = 0, p = 0; i < N; i++) {
-    input[i] = data[p]; input[N + i] = data[p + 1]; input[2 * N + i] = data[p + 2];
-    p += 4;
-  }
-  // Run synchronously (ORT session.run is async but we await)
-  return { input, scale, dx, dy, srcW, srcH, srcCtx, srcCv };
-}
-
 // We need async for sess.run, so make process async
 async function processFrame(rgba, w, h) {
   const t0 = performance.now();
-  const detSize = 640;
-  const srcCv = new OffscreenCanvas(w, h);
-  const srcCtx = srcCv.getContext('2d');
-  srcCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+  if (!srcCv || srcCv.width !== w || srcCv.height !== h) {
+    srcCv = new OffscreenCanvas(w, h);
+    srcCtx = srcCv.getContext('2d');
+  }
+  if (!detCv) {
+    detCv = new OffscreenCanvas(detSize, detSize);
+    detCtx = detCv.getContext('2d');
+  }
 
-  // YuNet detection
-  const cv = new OffscreenCanvas(detSize, detSize);
-  const ctx = cv.getContext('2d');
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, detSize, detSize);
+  const srcRgba = new Uint8ClampedArray(rgba);
+  srcCtx.putImageData(new ImageData(srcRgba, w, h), 0, 0);
+
+  // YuNet detection letterbox
+  detCtx.fillStyle = '#000';
+  detCtx.fillRect(0, 0, detSize, detSize);
   const scale = Math.min(detSize / w, detSize / h);
   const nw = Math.round(w * scale), nh = Math.round(h * scale);
-  const dx = 0, dy = 0;
-  ctx.drawImage(srcCv, dx, dy, nw, nh);
-  const imgData = ctx.getImageData(0, 0, detSize, detSize).data;
+  detCtx.drawImage(srcCv, 0, 0, nw, nh);
+  const imgData = detCtx.getImageData(0, 0, detSize, detSize).data;
   const N = detSize * detSize;
-  const input = new Float32Array(3 * N);
   for (let i = 0, p = 0; i < N; i++) {
-    input[i] = imgData[p]; input[N + i] = imgData[p + 1]; input[2 * N + i] = imgData[p + 2];
+    detInput[i] = imgData[p];
+    detInput[N + i] = imgData[p + 1];
+    detInput[2 * N + i] = imgData[p + 2];
     p += 4;
   }
-  const t = new ort.Tensor('float32', input, [1, 3, detSize, detSize]);
+  const t = new ort.Tensor('float32', detInput, [1, 3, detSize, detSize]);
   const o = await yunetSess.run({ input: t });
 
   const strides = [8, 16, 32];
@@ -150,22 +135,25 @@ async function processFrame(rgba, w, h) {
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const idx = r * cols + c;
-        const clsScore = Math.min(1, Math.max(0, cls[idx]));
-        const objScore = Math.min(1, Math.max(0, obj[idx]));
-        const score = Math.sqrt(clsScore * objScore);
-        if (score < 0.5) continue;
+        const cScore = cls[idx];
+        if (cScore < 0.25) continue;
+        const oScore = obj[idx];
+        const prod = cScore * oScore;
+        if (prod < 0.25) continue; // sqrt(cls * obj) >= 0.5
+        const score = Math.sqrt(prod);
+
         const cx = (c + bbox[idx * 4 + 0]) * s;
         const cy = (r + bbox[idx * 4 + 1]) * s;
         const bw = Math.exp(bbox[idx * 4 + 2]) * s;
         const bh = Math.exp(bbox[idx * 4 + 3]) * s;
-        const x1 = (cx - bw / 2 - dx) / scale;
-        const y1 = (cy - bh / 2 - dy) / scale;
-        const x2 = (cx + bw / 2 - dx) / scale;
-        const y2 = (cy + bh / 2 - dy) / scale;
+        const x1 = (cx - bw / 2) / scale;
+        const y1 = (cy - bh / 2) / scale;
+        const x2 = (cx + bw / 2) / scale;
+        const y2 = (cy + bh / 2) / scale;
         const kpsArr = [];
         for (let n = 0; n < 5; n++) {
-          const kx = (kps[idx * 10 + 2 * n] + c) * s - dx;
-          const ky = (kps[idx * 10 + 2 * n + 1] + r) * s - dy;
+          const kx = (kps[idx * 10 + 2 * n] + c) * s;
+          const ky = (kps[idx * 10 + 2 * n + 1] + r) * s;
           kpsArr.push([kx / scale, ky / scale]);
         }
         dets.push({ x1, y1, x2, y2, score, kps: kpsArr.flat() });
@@ -189,25 +177,22 @@ async function processFrame(rgba, w, h) {
     }
   }
 
-  // Align + embed each face
+  // Align + embed each face directly
   const faces = kept.map(f => ({ x1: f.x1, y1: f.y1, x2: f.x2, y2: f.y2, score: f.score }));
   const embeddings = [];
-  const sfaceCv = new OffscreenCanvas(112, 112);
-  const sfaceCtx = sfaceCv.getContext('2d');
   for (const f of kept) {
     const kps5 = [];
     for (let i = 0; i < 5; i++) kps5.push([f.kps[i * 2], f.kps[i * 2 + 1]]);
-    alignFace(srcCtx, w, h, kps5, sfaceCtx);
-    const imgData = sfaceCtx.getImageData(0, 0, 112, 112).data;
-    const M = 112 * 112;
-    const input = new Float32Array(3 * M);
-    for (let i = 0, p = 0; i < M; i++) {
-      input[i] = imgData[p]; input[M + i] = imgData[p + 1]; input[2 * M + i] = imgData[p + 2];
-      p += 4;
-    }
-    const t = new ort.Tensor('float32', input, [1, 3, 112, 112]);
+    alignFaceDirect(srcRgba, w, h, kps5, sfaceInput);
+    const t = new ort.Tensor('float32', sfaceInput, [1, 3, 112, 112]);
     const o = await sfaceSess.run({ data: t });
-    embeddings.push(Array.from(o['fc1'].data));
+    const raw = o['fc1'].data;
+    let norm = 0;
+    for (let i = 0; i < raw.length; i++) norm += raw[i] * raw[i];
+    norm = Math.sqrt(norm) || 1;
+    const emb = new Float32Array(raw.length);
+    for (let i = 0; i < raw.length; i++) emb[i] = raw[i] / norm;
+    embeddings.push(Array.from(emb));
   }
   return { faces, embeddings, ms: performance.now() - t0 };
 }
@@ -225,9 +210,7 @@ self.onmessage = async (e) => {
   if (type === 'process') {
     try {
       const { frame, w, h } = e.data;
-      const rgba = new Uint8ClampedArray(frame);
-      const result = await processFrame(rgba, w, h);
-      // Transfer embeddings as-is (structured clone)
+      const result = await processFrame(frame, w, h);
       self.postMessage({ type: 'result', faces: result.faces, embeddings: result.embeddings, ms: result.ms });
     } catch (err) {
       self.postMessage({ type: 'error', message: String(err && err.message || err) });
