@@ -15,7 +15,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(root, 'node_modules', 'onnxruntime-web', 'dist');
 const ortDir = path.join(root, 'ort');
 const modelsDir = path.join(root, 'models');
-const ORT_FILES = ['ort.min.js', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.jsep.mjs', 'ort-wasm-simd-threaded.jsep.wasm'];
+const ORT_FILES = ['ort.all.min.js', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.jsep.mjs', 'ort-wasm-simd-threaded.jsep.wasm'];
 
 function fetchToFile(url, dest, expectedBytes) {
   return new Promise((resolve, reject) => {

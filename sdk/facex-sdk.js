@@ -25,13 +25,13 @@ class FaceXSDK {
     this._ready = false;
 
     // Reusable canvases
-    this._detCanvas = document.createElement('canvas');
+    this._detCanvas = (typeof document !== 'undefined' && document.createElement) ? document.createElement('canvas') : new OffscreenCanvas(this.detSize, this.detSize);
     this._detCtx = this._detCanvas.getContext('2d', { willReadFrequently: true });
-    this._cropCanvas = document.createElement('canvas');
+    this._cropCanvas = (typeof document !== 'undefined' && document.createElement) ? document.createElement('canvas') : new OffscreenCanvas(112, 112);
     this._cropCanvas.width = 112;
     this._cropCanvas.height = 112;
     this._cropCtx = this._cropCanvas.getContext('2d', { willReadFrequently: true });
-    this._srcCanvas = document.createElement('canvas');
+    this._srcCanvas = (typeof document !== 'undefined' && document.createElement) ? document.createElement('canvas') : new OffscreenCanvas(0, 0);
     this._srcCtx = this._srcCanvas.getContext('2d', { willReadFrequently: true });
   }
 

@@ -52,12 +52,105 @@ const sfaceInput = new Float32Array(3 * 112 * 112);
 let sfaceSess = null;
 async function ensureSface() {
   if (sfaceSess) return sfaceSess;
-  sfaceSess = await ort.InferenceSession.create(
-    await (await fetch('models/sface_int8.onnx')).arrayBuffer(),
-    { executionProviders: ['wasm'] }
-  );
+  const buf = await (await fetch('models/sface_int8.onnx')).arrayBuffer();
+  // Try WebGPU first (5-10x faster on modern GPUs), fall back to WASM
+  const eps = (typeof navigator !== 'undefined' && navigator.gpu) ? ['webgpu', 'wasm'] : ['wasm'];
+  try {
+    sfaceSess = await ort.InferenceSession.create(buf.slice(0), { executionProviders: eps });
+  } catch (e) {
+    sfaceSess = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
+  }
   return sfaceSess;
 }
+
+// ---------- SFace Web Worker (off main thread) ----------
+let sfaceWorker = null;
+let sfaceWorkerReady = false;
+let sfaceWorkerBusy = false;
+const sfacePending = [];   // { resolve, reject, frame, w, h }
+
+function ensureSfaceWorker() {
+  if (sfaceWorker && sfaceWorkerReady) return Promise.resolve(sfaceWorker);
+  if (sfaceWorker) {
+    // worker exists but not ready yet — wait for ready
+    return new Promise((resolve, reject) => {
+      const origHandler = sfaceWorker.onmessage;
+      const check = (e) => {
+        if (e.data && e.data.type === 'ready') {
+          sfaceWorkerReady = true;
+          sfaceWorker.onmessage = origHandler;
+          // process any queued requests
+          drainSfaceQueue();
+          resolve(sfaceWorker);
+        }
+      };
+      sfaceWorker.onmessage = (e) => { check(e); origHandler(e); };
+    });
+  }
+  return new Promise((resolve, reject) => {
+    sfaceWorker = new Worker('worker_sface.js');
+    sfaceWorker.onmessage = (e) => {
+      const { type } = e.data;
+      if (type === 'ready') {
+        sfaceWorkerReady = true;
+        // resolve init waiters
+        drainSfaceQueue();
+      } else if (type === 'result') {
+        sfaceWorkerBusy = false;
+        if (sfaceCurrentTask) { sfaceCurrentTask.resolve(e.data); sfaceCurrentTask = null; }
+        drainSfaceQueue();
+      } else if (type === 'error') {
+        sfaceWorkerBusy = false;
+        if (sfaceCurrentTask) { sfaceCurrentTask.reject(new Error(e.data.message)); sfaceCurrentTask = null; }
+        drainSfaceQueue();
+      }
+    };
+    sfaceWorker.onerror = (e) => {
+      sfaceWorkerBusy = false;
+      if (sfaceCurrentTask) { sfaceCurrentTask.reject(e); sfaceCurrentTask = null; }
+      drainSfaceQueue();
+    };
+    sfaceWorker.postMessage({ type: 'init' });
+    // Wait for ready
+    const checkReady = setInterval(() => {
+      if (sfaceWorkerReady) {
+        clearInterval(checkReady);
+        resolve(sfaceWorker);
+      }
+    }, 50);
+    // Timeout after 60s
+    setTimeout(() => {
+      clearInterval(checkReady);
+      if (!sfaceWorkerReady) reject(new Error('SFace worker init timeout'));
+    }, 60000);
+  });
+}
+
+let sfaceCurrentTask = null;
+
+function drainSfaceQueue() {
+  if (sfaceWorkerBusy || sfacePending.length === 0) return;
+  const task = sfacePending.shift();
+  sfaceWorkerBusy = true;
+  sfaceCurrentTask = task;
+  sfaceWorker.postMessage({ type: 'process', frame: task.frame, w: task.w, h: task.h }, [task.frame]);
+}
+
+let sfacePendingResult = null;
+
+function postToSfaceWorker(frame, w, h) {
+  return new Promise((resolve, reject) => {
+    const task = { frame, w, h, resolve, reject };
+    sfacePending.push(task);
+    if (sfaceWorkerReady && !sfaceWorkerBusy) {
+      drainSfaceQueue();
+    }
+    // If worker not ready, drainSfaceQueue will be called when ready
+  });
+}
+
+// Update onmessage to use sfacePendingResult
+// (patched below)
 
 let yunetSess = null;
 async function ensureYuNet() {
@@ -227,6 +320,17 @@ function decodeFacex(out, W, H, scoreThr = 0.42, nmsThr = 0.4) {
   return kept;
 }
 
+function captureFrameForWorker(src) {
+  const srcW = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoWidth || src.naturalWidth) : src.width;
+  const srcH = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoHeight || src.naturalHeight) : src.height;
+  const cv = document.createElement('canvas');
+  cv.width = srcW; cv.height = srcH;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0);
+  const imgData = ctx.getImageData(0, 0, srcW, srcH);
+  return { frame: imgData.data.buffer, w: srcW, h: srcH };
+}
+
 // ---------- embeddings ----------
 async function detectFaces(src) {
   const { scale } = fillDetInput(src, DET_HW, DET_HW);
@@ -348,43 +452,13 @@ async function analyzeSource(src) {
     };
   }
   if (state.engine === 'sface') {
-    const t0 = performance.now();
-    await ensureSface();
-    await ensureYuNet();
-    const faces = await detectYuNet(src);   // OpenCV YuNet ONNX → 5 kps in ArcFace order
-    const embeddings = [];
-    for (const f of faces) {
-      const srcW = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoWidth || src.naturalWidth) : src.width;
-      const srcH = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoHeight || src.naturalHeight) : src.height;
-      // draw source into a canvas alignFace can read from
-      const srcCv = document.createElement('canvas');
-      srcCv.width = srcW; srcCv.height = srcH;
-      const srcCtx = srcCv.getContext('2d', { willReadFrequently: true });
-      srcCtx.drawImage(src, 0, 0);
-      // 5-point alignment to 112x112 (same ArcFace template as the SDK path)
-      const kps5 = [];
-      for (let i = 0; i < 5; i++) kps5.push([f.kps[i * 2], f.kps[i * 2 + 1]]);
-      alignFace(srcCtx, srcW, srcH, kps5, sfaceCtx);
-      // SFace (OpenCV FaceRecognizerSF): blobFromImage(img, 1, Size(112,112), Scalar(0,0,0), true, false)
-      // → RGB channel order (swapRB), NO normalization, raw 0-255 float, CHW
-      const imgData = sfaceCtx.getImageData(0, 0, 112, 112).data;
-      const N = 112 * 112;
-      for (let i = 0, p = 0; i < N; i++) {
-        sfaceInput[i]         = imgData[p];       // R
-        sfaceInput[N + i]     = imgData[p + 1];   // G
-        sfaceInput[2 * N + i] = imgData[p + 2];   // B
-        p += 4;
-      }
-      const t = new ort.Tensor('float32', sfaceInput, [1, 3, 112, 112]);
-      const o = await sfaceSess.run({ data: t });
-      const out = o['fc1'].data;
-      embeddings.push(Float32Array.from(out));
-    }
+    const { frame, w, h } = captureFrameForWorker(src);
+    const result = await postToSfaceWorker(frame, w, h);
     return {
-      faces: faces.map(f => ({ x1: f.x1, y1: f.y1, x2: f.x2, y2: f.y2, score: f.score })),
-      embeddings,
+      faces: result.faces,
+      embeddings: result.embeddings.map(e => new Float32Array(e)),
       detMs: 0,
-      totalMs: performance.now() - t0,
+      totalMs: result.ms,
     };
   }
 
@@ -568,7 +642,13 @@ function roundRect(ctx, x, y, w, h, r) {
 // ---------- check-in core ----------
 async function processFrame(src, { forLog = true } = {}) {
   const t0 = performance.now();
-  const res = await analyzeSource(src);
+  let res;
+  try {
+    res = await analyzeSource(src);
+  } catch (e) {
+    if (e && /worker busy/.test(e.message || '')) return null;   // skip frame, worker still busy
+    throw e;
+  }
   const faces = res.faces;
 
   const results = [];
@@ -672,6 +752,7 @@ async function boothLoop() {
   $('#liveDot').classList.add('busy');
   try {
     const { faces, results } = await processFrame(video, { forLog: true });
+    if (!faces) return;   // worker still busy — skip this frame, main thread stays free
     drawDetections(faces, results);
     // hide banner after timeout
     if (state.bannerUntil && now > state.bannerUntil) { $('#banner').style.display = 'none'; state.bannerUntil = 0; }
@@ -880,7 +961,9 @@ async function testPhoto(file) {
   out.textContent = 'Processing…';
   try {
     const img = await fileToImage(file);
-    const { faces, results } = await processFrame(img, { forLog: false });
+    const pf = await processFrame(img, { forLog: false });
+    if (!pf) { out.textContent = 'Engine busy — try again in a moment.'; return; }
+    const { faces, results } = pf;
     if (!faces.length) { out.textContent = 'No face detected in that photo.'; return; }
     const r = results[0];
     out.innerHTML = r.matched
@@ -896,13 +979,12 @@ async function loadCoreModels() {
   const t0 = performance.now();
   setStat('#statState', 'loading models…');
   $('#liveDot').classList.add('busy');
-  if (state.engine === 'sdk' || state.engine === 'sface') {
+  if (state.engine === 'sdk') {
     await ensureSdk();
-  }
-  if (state.engine === 'sface') {
-    await ensureSface();
-  }
-  if (state.engine === 'tiny' || state.engine === 'nano') {
+  } else if (state.engine === 'sface') {
+    // worker handles model loading — just warm up the worker
+    await ensureSfaceWorker();
+  } else {
     state.detSess = await loadEncryptedSession('models/facex_detect.enc');
     state.recSess = await loadEncryptedSession(`models/facex_${state.recognitionModel}.enc`);
   }
@@ -920,19 +1002,21 @@ async function switchEngine(value) {
   localStorage.setItem('fx_model', value);
   warnEngineMismatch();
   const t0 = performance.now();
-  if (value === 'sdk' || value === 'sface') {
+  if (value === 'sdk') {
     await ensureSdk();
-  }
-  if (value === 'sface') {
-    await ensureSface();
-  }
-  if (value === 'tiny' || value === 'nano') {
+    setStat('#statLoad', ((performance.now() - t0) / 1000).toFixed(2) + ' s');
+    toast('Recognition engine → EdgeFace-XS (aligned)');
+  } else if (value === 'sface') {
+    await ensureSfaceWorker();
+    setStat('#statLoad', ((performance.now() - t0) / 1000).toFixed(2) + ' s');
+    toast('Recognition engine → SFace (OpenCV, Apache 2.0)');
+  } else {
     if (!state.detSess) state.detSess = await loadEncryptedSession('models/facex_detect.enc');
     state.recognitionModel = value;
     state.recSess = await loadEncryptedSession(`models/facex_${value}.enc`);
+    setStat('#statLoad', ((performance.now() - t0) / 1000).toFixed(2) + ' s (rec only)');
+    toast(`Recognition engine → facex_${value}`);
   }
-  setStat('#statLoad', ((performance.now() - t0) / 1000).toFixed(2) + ' s');
-  toast(`Recognition engine → ${value === 'sdk' ? 'EdgeFace-XS (aligned)' : value === 'sface' ? 'SFace (OpenCV, Apache 2.0)' : 'facex_' + value}`);
 }
 
 // ---------- wiring ----------

@@ -12,7 +12,7 @@ const powell1 = fs.readFileSync(path.join(LFW, 'Colin_Powell', 'Colin_Powell_000
 
 const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
-page.on('console', m => { if (m.type() === 'error') console.log('console error:', m.text()); });
+page.on('console', m => { console.log('[' + m.type() + ']', m.text().slice(0, 200)); });
 page.on('pageerror', e => console.log('pageerror:', e.message));
 await page.goto('http://127.0.0.1:8080/', { waitUntil: 'load', timeout: 30000 });
 await page.waitForFunction(() => /press Start Camera|failed/.test(document.querySelector('#statState').textContent), null, { timeout: 90000 });
@@ -32,8 +32,14 @@ console.log('enroll:', await page.textContent('#batchStatus'));
 await page.click('[data-tab="settings"]');
 for (const [label, buf] of [['same-person (Bush 0003)', bush3], ['other (Powell 0001)', powell1]]) {
   const prev = await page.textContent('#testPhotoResult');
+  console.log('before upload, testPhotoResult:', prev.slice(0, 60));
   await page.setInputFiles('#testPhoto', { name: label.replace(/\W/g, '_') + '.jpg', mimeType: 'image/jpeg', buffer: buf });
-  await page.waitForFunction((old) => { const t = document.querySelector('#testPhotoResult').textContent || ''; return t !== old && !/Processing/.test(t); }, prev, { timeout: 180000 });
+  try {
+    await page.waitForFunction((old) => { const t = document.querySelector('#testPhotoResult').textContent || ''; return t !== old && !/Processing/.test(t); }, prev, { timeout: 60000 });
+  } catch (e) {
+    console.log('TIMEOUT waiting for result. Current text:', (await page.textContent('#testPhotoResult')).trim());
+    break;
+  }
   console.log(`${label}:`, (await page.textContent('#testPhotoResult')).trim());
 }
 await browser.close();
