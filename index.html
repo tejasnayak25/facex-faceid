@@ -291,12 +291,11 @@
         <div class="setting">
           <div class="row-label"><span>Recognition engine</span></div>
           <select id="engineSelect">
-            <option value="sdk" selected>EdgeFace-XS — WASM SDK, 5-point aligned (recommended)</option>
-            <option value="sface">SFace — OpenCV, Apache 2.0, 99% LFW claim</option>
+            <option value="sface" selected>SFace (Optimized) — OpenCV, 100% Apache 2.0 Open Source (Recommended)</option>
             <option value="tiny">facex_tiny — ONNX, ~87% LFW-verified (fallback)</option>
             <option value="nano">facex_nano — ONNX, ~83% LFW-verified, fastest</option>
           </select>
-          <p class="hint">The SDK path aligned-crops faces the way the model was trained — dramatically better match separation (0.70 genuine vs 0.05 impostor on LFW). Switching loads the engine lazily.</p>
+          <p class="hint">SFace uses OpenCV Zoo's Apache 2.0 open-source model with YuNet landmark alignment and 128-d pre-normalized fast search. Pure open-source, compliant for commercial and institutional check-in.</p>
         </div>
 
         <div class="setting switch-row">

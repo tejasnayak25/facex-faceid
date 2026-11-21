@@ -38,19 +38,21 @@ function alignFaceDirect(src, srcW, srcH, kps, dst) {
   const tyi = (bi * tx - ai * ty);
   const M = 112 * 112;
 
+  let di = 0;
   for (let dy = 0; dy < 112; dy++) {
-    for (let dx = 0; dx < 112; dx++) {
-      const sx = ai * dx - bi * dy + txi;
-      const sy = bi * dx + ai * dy + tyi;
+    let sx = -bi * dy + txi;
+    let sy = ai * dy + tyi;
+    for (let dx = 0; dx < 112; dx++, di++, sx += ai, sy += bi) {
       const x0 = Math.floor(sx), y0 = Math.floor(sy);
       const x1 = x0 + 1, y1 = y0 + 1;
-      const fx = sx - x0, fy = sy - y0;
-      const di = dy * 112 + dx;
       if (x0 >= 0 && x1 < srcW && y0 >= 0 && y1 < srcH) {
-        const i00 = (y0 * srcW + x0) * 4;
-        const i10 = (y0 * srcW + x1) * 4;
-        const i01 = (y1 * srcW + x0) * 4;
-        const i11 = (y1 * srcW + x1) * 4;
+        const fx = sx - x0, fy = sy - y0;
+        const row0 = y0 * srcW * 4;
+        const row1 = y1 * srcW * 4;
+        const i00 = row0 + x0 * 4;
+        const i10 = row0 + x1 * 4;
+        const i01 = row1 + x0 * 4;
+        const i11 = row1 + x1 * 4;
         const w00 = (1 - fx) * (1 - fy);
         const w10 = fx * (1 - fy);
         const w01 = (1 - fx) * fy;
@@ -74,20 +76,25 @@ let detCv = null, detCtx = null;
 const detSize = 640;
 const detInput = new Float32Array(3 * detSize * detSize);
 const sfaceInput = new Float32Array(3 * 112 * 112);
+let detTensor = null;
+let sfaceTensor = null;
 
 async function init() {
   ort.env.wasm.wasmPaths = new URL('ort/', self.location.href).href;
-  ort.env.wasm.numThreads = Math.min(4, Math.max(1, (self.navigator?.hardwareConcurrency || 4) - 1));
+  const canThread = typeof self !== 'undefined' && Boolean(self.crossOriginIsolated);
+  ort.env.wasm.numThreads = canThread ? Math.min(4, Math.max(1, (self.navigator?.hardwareConcurrency || 4) - 1)) : 1;
   ort.env.wasm.simd = true;
   ort.env.logLevel = 'error';
   const yunetBuf = await (await fetch('models/yunet_2023mar_int8.onnx')).arrayBuffer();
-  const sfaceBuf = await (await fetch('models/sface_int8.onnx')).arrayBuffer();
+  const sfaceBuf = await (await fetch('models/sface_fp32_clean.onnx')).arrayBuffer();
   yunetSess = await ort.InferenceSession.create(yunetBuf, { executionProviders: ['wasm'] });
   try {
     sfaceSess = await ort.InferenceSession.create(sfaceBuf.slice(0), { executionProviders: ['webgpu', 'wasm'] });
   } catch (e) {
     sfaceSess = await ort.InferenceSession.create(sfaceBuf, { executionProviders: ['wasm'] });
   }
+  detTensor = new ort.Tensor('float32', detInput, [1, 3, detSize, detSize]);
+  sfaceTensor = new ort.Tensor('float32', sfaceInput, [1, 3, 112, 112]);
   self.postMessage({ type: 'ready' });
 }
 
@@ -96,11 +103,11 @@ async function processFrame(rgba, w, h) {
   const t0 = performance.now();
   if (!srcCv || srcCv.width !== w || srcCv.height !== h) {
     srcCv = new OffscreenCanvas(w, h);
-    srcCtx = srcCv.getContext('2d');
+    srcCtx = srcCv.getContext('2d', { willReadFrequently: true });
   }
   if (!detCv) {
     detCv = new OffscreenCanvas(detSize, detSize);
-    detCtx = detCv.getContext('2d');
+    detCtx = detCv.getContext('2d', { willReadFrequently: true });
   }
 
   const srcRgba = new Uint8ClampedArray(rgba);
@@ -114,14 +121,13 @@ async function processFrame(rgba, w, h) {
   detCtx.drawImage(srcCv, 0, 0, nw, nh);
   const imgData = detCtx.getImageData(0, 0, detSize, detSize).data;
   const N = detSize * detSize;
-  for (let i = 0, p = 0; i < N; i++) {
+  const N2 = 2 * N;
+  for (let i = 0, p = 0; i < N; i++, p += 4) {
     detInput[i] = imgData[p];
     detInput[N + i] = imgData[p + 1];
-    detInput[2 * N + i] = imgData[p + 2];
-    p += 4;
+    detInput[N2 + i] = imgData[p + 2];
   }
-  const t = new ort.Tensor('float32', detInput, [1, 3, detSize, detSize]);
-  const o = await yunetSess.run({ input: t });
+  const o = await yunetSess.run({ input: detTensor });
 
   const strides = [8, 16, 32];
   const dets = [];
@@ -177,22 +183,23 @@ async function processFrame(rgba, w, h) {
     }
   }
 
-  // Align + embed each face directly
+  // Align + embed each face directly (sort largest foreground face first)
+  kept.sort((a, b) => (b.x2 - b.x1) * (b.y2 - b.y1) - (a.x2 - a.x1) * (a.y2 - a.y1));
   const faces = kept.map(f => ({ x1: f.x1, y1: f.y1, x2: f.x2, y2: f.y2, score: f.score }));
   const embeddings = [];
-  for (const f of kept) {
+  const toEmbed = kept.slice(0, 1);
+  for (const f of toEmbed) {
     const kps5 = [];
     for (let i = 0; i < 5; i++) kps5.push([f.kps[i * 2], f.kps[i * 2 + 1]]);
     alignFaceDirect(srcRgba, w, h, kps5, sfaceInput);
-    const t = new ort.Tensor('float32', sfaceInput, [1, 3, 112, 112]);
-    const o = await sfaceSess.run({ data: t });
+    const o = await sfaceSess.run({ data: sfaceTensor });
     const raw = o['fc1'].data;
     let norm = 0;
     for (let i = 0; i < raw.length; i++) norm += raw[i] * raw[i];
     norm = Math.sqrt(norm) || 1;
     const emb = new Float32Array(raw.length);
     for (let i = 0; i < raw.length; i++) emb[i] = raw[i] / norm;
-    embeddings.push(Array.from(emb));
+    embeddings.push(emb);
   }
   return { faces, embeddings, ms: performance.now() - t0 };
 }

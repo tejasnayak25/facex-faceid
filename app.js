@@ -52,7 +52,7 @@ const sfaceInput = new Float32Array(3 * 112 * 112);
 let sfaceSess = null;
 async function ensureSface() {
   if (sfaceSess) return sfaceSess;
-  const buf = await (await fetch('models/sface_int8.onnx')).arrayBuffer();
+  const buf = await (await fetch('models/sface_fp32_clean.onnx')).arrayBuffer();
   // Try WebGPU first (5-10x faster on modern GPUs), fall back to WASM
   const eps = (typeof navigator !== 'undefined' && navigator.gpu) ? ['webgpu', 'wasm'] : ['wasm'];
   try {
@@ -320,14 +320,19 @@ function decodeFacex(out, W, H, scoreThr = 0.42, nmsThr = 0.4) {
   return kept;
 }
 
+let workerCanvas = null;
+let workerCtx = null;
 function captureFrameForWorker(src) {
   const srcW = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoWidth || src.naturalWidth) : src.width;
   const srcH = (src instanceof HTMLVideoElement || src instanceof HTMLImageElement) ? (src.videoHeight || src.naturalHeight) : src.height;
-  const cv = document.createElement('canvas');
-  cv.width = srcW; cv.height = srcH;
-  const ctx = cv.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(src, 0, 0);
-  const imgData = ctx.getImageData(0, 0, srcW, srcH);
+  if (!workerCanvas || workerCanvas.width !== srcW || workerCanvas.height !== srcH) {
+    workerCanvas = document.createElement('canvas');
+    workerCanvas.width = srcW;
+    workerCanvas.height = srcH;
+    workerCtx = workerCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  workerCtx.drawImage(src, 0, 0);
+  const imgData = workerCtx.getImageData(0, 0, srcW, srcH);
   return { frame: imgData.data.buffer, w: srcW, h: srcH };
 }
 
@@ -456,7 +461,7 @@ async function analyzeSource(src) {
     const result = await postToSfaceWorker(frame, w, h);
     return {
       faces: result.faces,
-      embeddings: result.embeddings.map(e => new Float32Array(e)),
+      embeddings: result.embeddings.map(e => e instanceof Float32Array ? e : new Float32Array(e)),
       detMs: 0,
       totalMs: result.ms,
     };
@@ -530,7 +535,7 @@ const state = {
   cooldownMin: 5,
   multiFrame: true,
   spoofEnabled: false,
-  engine: 'sdk',              // 'sdk' = EdgeFace-XS aligned WASM | 'sface' = SFace (OpenCV, Apache 2.0) | 'tiny'/'nano' = ONNX
+  engine: 'sface',            // 'sface' = SFace (OpenCV, Apache 2.0, recommended) | 'tiny'/'nano' = ONNX | 'sdk' = EdgeFace (non-commercial)
   recognitionModel: 'tiny',
   consecutive: { id: null, count: 0 },
   cooldowns: new Map(),   // roll -> last check-in ts
@@ -566,16 +571,86 @@ function cosine(a, b) {
   return denom > 0 ? dot / denom : 0;
 }
 
-function bestMatch(emb) {
-  let best = null, bestScore = -1;
-  const t0 = performance.now();
+// Pre-normalized contiguous vector cache for ultra-fast matching (<0.1ms search)
+let vectorIndex = {};
+
+function rebuildVectorIndex() {
+  vectorIndex = {};
   for (const s of state.students) {
-    if (s.embedding.length !== emb.length) continue;   // skip cross-engine records
-    const sc = cosine(emb, s.embedding);
-    if (sc > bestScore) { bestScore = sc; best = s; }
+    if (!s.embedding || !s.embedding.length) continue;
+    const dim = s.embedding.length;
+    if (!vectorIndex[dim]) {
+      vectorIndex[dim] = { students: [] };
+    }
+    vectorIndex[dim].students.push(s);
   }
-  state.ewma.search = state.ewma.search ? state.ewma.search * 0.85 + (performance.now() - t0) * 0.15 : performance.now() - t0;
-  return { student: best, score: bestScore };
+  for (const dim in vectorIndex) {
+    const entry = vectorIndex[dim];
+    const d = Number(dim);
+    const n = entry.students.length;
+    const mat = new Float32Array(n * d);
+    for (let i = 0; i < n; i++) {
+      const emb = entry.students[i].embedding;
+      let norm = 0;
+      for (let j = 0; j < d; j++) norm += emb[j] * emb[j];
+      norm = Math.sqrt(norm) || 1;
+      const off = i * d;
+      for (let j = 0; j < d; j++) mat[off + j] = emb[j] / norm;
+    }
+    entry.matrix = mat;
+    entry.dim = d;
+  }
+}
+
+function bestMatch(emb) {
+  if (!emb || !emb.length) return { student: null, score: -1 };
+  const t0 = performance.now();
+  const dim = emb.length;
+  const idx = vectorIndex[dim];
+
+  if (!idx || !idx.matrix || idx.students.length === 0) {
+    let best = null, bestScore = -1;
+    for (const s of state.students) {
+      if (s.embedding.length !== dim) continue;   // skip cross-engine records
+      const sc = cosine(emb, s.embedding);
+      if (sc > bestScore) { bestScore = sc; best = s; }
+    }
+    const dt = performance.now() - t0;
+    state.ewma.search = state.ewma.search ? state.ewma.search * 0.85 + dt * 0.15 : dt;
+    return { student: best, score: bestScore };
+  }
+
+  // Pre-normalize query vector once
+  let qNorm = 0;
+  for (let j = 0; j < dim; j++) qNorm += emb[j] * emb[j];
+  qNorm = Math.sqrt(qNorm) || 1;
+  const q = new Float32Array(dim);
+  for (let j = 0; j < dim; j++) q[j] = emb[j] / qNorm;
+
+  const mat = idx.matrix;
+  const students = idx.students;
+  const n = students.length;
+  let bestScore = -1;
+  let bestIdx = -1;
+
+  for (let i = 0; i < n; i++) {
+    const off = i * dim;
+    let dot = 0;
+    for (let j = 0; j < dim; j++) {
+      dot += q[j] * mat[off + j];
+    }
+    if (dot > bestScore) {
+      bestScore = dot;
+      bestIdx = i;
+    }
+  }
+
+  const dt = performance.now() - t0;
+  state.ewma.search = state.ewma.search ? state.ewma.search * 0.85 + dt * 0.15 : dt;
+  return {
+    student: bestIdx >= 0 ? students[bestIdx] : null,
+    score: bestScore,
+  };
 }
 
 // ---------- overlay drawing ----------
@@ -656,13 +731,20 @@ async function processFrame(src, { forLog = true } = {}) {
   for (let i = 0; i < faces.length; i++) {
     const f = faces[i];
     const emb = res.embeddings[i];
-
-    // anti-spoof gate
-    let live = 1;
-    if (state.spoofEnabled) live = await spoofLiveScore(src, f);
-    const liveOk = live >= 0.5;
+    if (!emb) {
+      results.push({ matched: false, score: -1, live: 1, student: null, label: '' });
+      continue;
+    }
 
     const { student, score } = bestMatch(emb);
+
+    // anti-spoof gate: only evaluate when candidate passes similarity threshold
+    let live = 1;
+    if (state.spoofEnabled && student && score >= state.threshold) {
+      live = await spoofLiveScore(src, f);
+    }
+    const liveOk = live >= 0.5;
+
     const matched = !!student && score >= state.threshold && liveOk;
     results.push({
       matched, score, live, student,
@@ -744,7 +826,7 @@ async function boothLoop() {
   requestAnimationFrame(boothLoop);
   resizeOverlayToStage();
   const now = performance.now();
-  if (now - state.lastFrameAt < 250) return;   // ~4 booth scans/sec, plenty for check-in
+  if (now - state.lastFrameAt < 40) return;    // ~25 scans/sec for responsive real-time tracking
   if (state.processing) return;
   state.lastFrameAt = now;
   if (video.readyState < 2) return;
@@ -872,6 +954,7 @@ function fileToImage(file) {
 // ---------- database tab ----------
 async function reloadStudents() {
   state.students = await idb.studentsAll();
+  rebuildVectorIndex();
   setStat('#statDb', String(state.students.length));
   renderDbList($('#dbSearch').value.trim().toLowerCase());
   warnEngineMismatch();
@@ -911,15 +994,26 @@ async function exportDb() {
 }
 async function importDb(file) {
   const data = JSON.parse(await file.text());
+  const list = Array.isArray(data) ? data : (data.students || []);
   let n = 0;
-  for (const s of data.students || []) {
-    const emb = s.embedding instanceof Array ? Float32Array.from(s.embedding) : null;
+  for (const s of list) {
+    const rawEmb = s.vector || s.embedding;
+    const emb = rawEmb instanceof Array ? Float32Array.from(rawEmb) : null;
     if (!emb || (emb.length !== 512 && emb.length !== 256 && emb.length !== 128)) continue;
-    await idb.studentAdd({ name: s.name || 'Unnamed', roll: s.roll || '?', embedding: emb, thumb: s.thumb || '', shots: s.shots || 1, enrolledAt: s.enrolledAt || Date.now(), engine: s.engine || 'tiny' });
+    const engine = s.engine || (emb.length === 128 ? 'sface' : (emb.length === 512 ? 'sdk' : 'tiny'));
+    await idb.studentAdd({
+      name: s.name || 'Unnamed',
+      roll: s.ticketId || s.roll || '?',
+      embedding: emb,
+      thumb: s.avatar || s.thumb || '',
+      shots: s.shots || 1,
+      enrolledAt: s.enrolledAt || Date.now(),
+      engine: engine,
+    });
     n++;
   }
   await reloadStudents();
-  toast(`Imported ${n} students`);
+  toast(`Imported ${n} attendees`);
 }
 function downloadBlob(blob, name) {
   const a = document.createElement('a');
